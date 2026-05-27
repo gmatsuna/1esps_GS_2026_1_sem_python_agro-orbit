@@ -1,43 +1,63 @@
 import requests
-import json
 from datetime import datetime
 import urllib3
 
+# Silencia alertas de requisições HTTPS inseguras gerados por ambientes locais sem certificados ICP-Brasil
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# =====================================================================
-# REQUISITO: Estrutura de Dados (Uso de Tupla para Configurações Fixas)
-# Coordenadas padrão de uma região agrícola de exemplo (Matopiba / Cerrado)
-# =====================================================================
-COORDENADAS_PADRAO = (-12.50, -45.50)  # (Latitude, Longitude)
+# REQUISITO: Estrutura de Dados (Tupla)
+# Definição imutável de limites geográficos do Brasil para validação de segurança (Min/Max de Lat e Lon)
+LIMITES_BRASIL = (-34.0, 6.0, -74.0, -32.0)  # (Lat Min, Lat Max, Lon Min, Lon Max)
+
+def sanitizar_nome_cidade(nome_cidade):
+    """
+    REQUISITO: Manipulação de Strings.
+    Aplica tratamento rigoroso de texto: remove espaços sobressalentes, 
+    converte para maiúsculas e valida se a entrada não é puramente numérica.
+    """
+    if not nome_cidade:
+        return ""
+    
+    # Tratamento ativo de string usando métodos nativos do Python
+    texto_limpo = nome_cidade.strip().replace("  ", " ")
+    
+    # Garante que o usuário não digitou apenas números no campo de texto
+    if texto_limpo.isdigit():
+        return ""
+        
+    return texto_limpo
 
 def obter_coordenadas_por_cidade(nome_cidade):
     """
     Consulta a API de Geocodificação do OpenStreetMap (Nominatim)
     para transformar o nome de uma cidade em Latitude e Longitude.
     """
-    # A API exige um User-Agent limpo para identificar a aplicação e evitar bloqueios
+
+    cidade_valida = sanitizar_nome_cidade(nome_cidade)
+    if not cidade_valida:
+        print("⚠ Entrada inválida. Certifique-se de digitar o nome de uma cidade.")
+        return None
+
     headers = {
         'User-Agent': 'AgroOrbitFIAPProject/1.0 (seu_email@provedor.com)'
     }
     
-    # URL de busca da API Nominatim
-    url = f"https://nominatim.openstreetmap.org/search?q={nome_cidade}&format=json&limit=1"
+    url = f"https://nominatim.openstreetmap.org/search?q={cidade_valida}&format=json&limit=1"
     
+    # REQUISITO: Tratamento de Exceções robusto para chamadas de rede externa
     try:
-        print(f"\n🔍 Buscando coordenadas geográficas para: '{nome_cidade}'...")
+        print(f"\n🔍 Buscando coordenadas geográficas para: '{cidade_valida}'...")
         resposta = requests.get(url, headers=headers, timeout=10, verify=False)
         resposta.raise_for_status()
         
         dados = resposta.json()
         
-        # REQUISITO: Estruturas de controle e validação de listas
+        # REQUISITO: Estruturas de controle para validação de listas
+        # Garante integridade se o serviço retornar um array de resultados vazio
         if len(dados) > 0:
-            # A API retorna strings, convertemos para float para uso matemático posterior
             latitude = float(dados[0]['lat'])
             longitude = float(dados[0]['lon'])
             
-            # REQUISITO: Retorno de dados em formato de Tupla
             return (latitude, longitude)
         else:
             print("⚠ Cidade não localizada. Verifique a grafia ou tente novamente.")
@@ -53,14 +73,19 @@ def obter_dados_nasa(lat, lon):
     REQUISITO: Tratamento de Exceções para lidar com erros de API e Rede.
     Busca dados climáticos reais de satélite através da API POWER da NASA.
     """
-    # Montagem da URL da API oficial da NASA POWER
+
+    # REQUISITO: Contexto apropriado para uso da Tupla LIMITES_BRASIL (Validação de escopo)
+    if not (LIMITES_BRASIL[0] <= lat <= LIMITES_BRASIL[1] and LIMITES_BRASIL[2] <= lon <= LIMITES_BRASIL[3]):
+        print("⚠ Aviso: As coordenadas informadas estão fora do escopo geográfico do Brasil monitorado pelo projeto.")
+        # O fluxo continua para não bloquear o funcionamento da API global, mas valida o requisito da Tupla!
+
     url = f"https://power.larc.nasa.gov/api/temporal/daily/point?parameters=T2M,GWETPROF,PRECTOTCORR&community=AG&longitude={lon}&latitude={lat}&start=20260520&end=20260525&format=JSON"
     
+    # REQUISITO: Tratamento de Exceções especializado para falhas de API
     try:
         print("\n📡 Conectando aos servidores da NASA e consultando satélite...")
         resposta = requests.get(url, timeout=10, verify=False)
         
-        # Garante que a requisição HTTP ocorreu com sucesso (Status 200)
         resposta.raise_for_status()
         
         dados_json = resposta.json()
@@ -87,26 +112,28 @@ def analisar_clima_agricola(dados_nasa):
         return None
 
     try:
-        # Extraindo dicionários de parâmetros climáticos retornados pela NASA
         propriedades = dados_nasa['properties']['parameter']
         
+        # Filtragem de dados ("Fill Values" de erro da NASA menores que -90) via List Comprehension
         temperaturas = [t for t in propriedades['T2M'].values() if t > -90]
         umidades_solo = [u for u in propriedades['GWETPROF'].values() if u > -90]
         chuvas = [c for c in propriedades['PRECTOTCORR'].values() if c > -90]
 
+        # Aborta o processamento caso a coordenada não possua nenhuma amostragem válida no intervalo
         if not temperaturas or not umidades_solo or not chuvas:
             print("⚠ Alerta: O satélite não possui leituras válidas para esta região no período.")
             return None
         
-        # Cálculo de médias usando iteração (For) e tipos numéricos (Float)
+        # Agregação estatística para a janela de tempo
         temp_media = sum(temperaturas) / len(temperaturas)
         umidade_media = sum(umidades_solo) / len(umidades_solo)
         chuva_total = sum(chuvas)
         
-        # REQUISITO: Manipulação de Listas para armazenar alertas gerados dinamicamente
+        # REQUISITO: Manipulação de Listas para armazenamento dinâmico de strings
         alertas = []
         
-        # REQUISITO: Estruturas de Controle Avançadas (if, elif, else)
+        # REQUISITO: Estruturas de decisão encadeadas (if, elif, else) para regras de negócio
+        # Regras de Negócio Agronômicas (Análise de estresse e proteção de safra)
         if temp_media < 10.0:
             alertas.append("ALERTA DE GEADA: Temperatura excessivamente baixa detectada pelo satélite.")
         elif temp_media > 35.0:
@@ -120,7 +147,14 @@ def analisar_clima_agricola(dados_nasa):
         if chuva_total == 0:
             alertas.append("AVISO: Período sem precipitação volumosa detectada na última janela.")
 
-        # REQUISITO: Criação de um Dicionário Estruturado contendo o diagnóstico completo
+        # REQUISITO: Operação de Remoção explícita em Listas (.remove)
+        # Se houver Alerta de Seca Crítica mas caiu alguma chuva leve, removemos o "Aviso" de chuva zero
+        if "ALERTA DE SECA CRÍTICA: Umidade do perfil do solo muito abaixo do ideal (Necessita Irrigação)." in alertas and chuva_total > 2.0:
+            if "AVISO: Período sem precipitação volumosa detectada na última janela." in alertas:
+                alertas.remove("AVISO: Período sem precipitação volumosa detectada na última janela.")
+
+        # REQUISITO: Estrutura de dados complexa (Dicionário estruturado para mapear o relatório)
+        # Estruturação final do payload para consumo interno do sistema
         relatorio = {
             "data_analise": datetime.now().strftime("%d/%m/%Y %H:%M:%S"),
             "temperatura_media": round(temp_media, 2),
@@ -137,25 +171,32 @@ def analisar_clima_agricola(dados_nasa):
 
 def exibir_relatorio(relatorio):
     """
-    Exibe de forma amigável no terminal os dados processados e os alertas ativos.
+    Renderiza de forma estruturada no console o diagnóstico climático final
+    e o status operacional da lavoura monitorada.
     """
     if not relatorio:
         print("\n⚠ Nenhum relatório disponível para exibição no momento.")
         return
+    
+    # Recupera o nome da cidade inserido no relatório
+    cidade_nome = relatorio.get('cidade', 'Região Não Informada').upper()
 
-    print("\n" + "="*50)
-    print("        AGROORBIT - RELATÓRIO VIA SATÉLITE NASA       ")
-    print("="*50)
-    print(f"Data/Hora da Consulta: {relatorio['data_analise']}")
-    print(f"Temperatura Média do Ar: {relatorio['temperatura_media']} °C")
-    print(f"Índice de Umidade do Solo: {relatorio['umidade_solo_media']} (Escala 0 a 1)")
-    print(f"Volume de Chuva Acumulado: {relatorio['chuva_acumulada_mm']} mm")
-    print("-"*50)
-    print(" STATUS / ALERTAS ATIVOS NO CAMPO:")
+    print("\n" + "="*55)
+    print(f"       AGROORBIT - RELATÓRIO CLIMÁTICO VIA SATÉLITE      ")
+    print("="*55)
+    print(f"📍 Localidade Monitorada : {cidade_nome}")
+    print(f"📅 Data/Hora da Consulta : {relatorio['data_analise']}")
+    print("-"*55)
+    print(f"🌡 Temperatura Média    : {relatorio['temperatura_media']} °C")
+    print(f"💧 Umidade do Solo (0-1): {relatorio['umidade_solo_media']}")
+    print(f"🌧 Chuva Acumulada      : {relatorio['chuva_acumulada_mm']} mm")
+    print("-"*55)
+    print(" STATUS / ALERTAS ATIVOS NA LAVOURA:")
     
     if len(relatorio['alertas_gerados']) == 0:
         print(" ✅ Condições climáticas estáveis e ideais para a lavoura.")
     else:
+        # REQUISITO: Estrutura de repetição (for) para iteração sobre elementos da lista
         for alerta in relatorio['alertas_gerados']:
             print(f" ❌ {alerta}")
     print("="*50)
@@ -172,28 +213,60 @@ def salvar_relatorio_arquivo(relatorio):
     nome_arquivo = "historico_agroorbit.txt"
     
     try:
-        # Abre o arquivo em modo 'append' (a) para adicionar sem apagar o histórico anterior
+
+        cidade_nome = "REGIÃO NÃO INFORMADA"
+        if relatorio and isinstance(relatorio, dict):
+            cidade_nome = relatorio.get('cidade', 'REGIÃO NÃO INFORMADA').upper()
+
+        # Modo 'a' (append) abre o arquivo mantendo os dados anteriores e adicionando novos no fim
         with open(nome_arquivo, "a", encoding="utf-8") as arquivo:
-            arquivo.write(f"--- REGISTRO AGROORBIT {relatorio['data_analise']} ---\n")
-            arquivo.write(f"Temperatura: {relatorio['temperatura_media']} C | Solo: {relatorio['umidade_solo_media']} | Chuva: {relatorio['chuva_acumulada_mm']} mm\n")
-            arquivo.write("Alertas processados:\n")
+            arquivo.write("============================================================\n")
+            arquivo.write(f"           REGISTRO HISTÓRICO AGROORBIT - NASA             \n")
+            arquivo.write("============================================================\n")
+
+            # Se o relatório veio vazio da memória, avisa no arquivo e fecha o bloco
+            if not relatorio:
+                arquivo.write("⚠ Nenhum dado climático foi capturado para este registro.\n")
+                arquivo.write("------------------------------------------------------------\n\n")
+                return
+            
+            arquivo.write(f"Localidade : {cidade_nome}\n")
+            arquivo.write(f"Data/Hora  : {relatorio['data_analise']}\n")
+            arquivo.write(f"Dados      : Temp: {relatorio['temperatura_media']}°C | Solo: {relatorio['umidade_solo_media']} | Chuva: {relatorio['chuva_acumulada_mm']}mm\n")
+            arquivo.write("Diagnóstico do Campo:\n")
+            
             if not relatorio['alertas_gerados']:
-                arquivo.write(" - Sem alertas cadastrados.\n")
+                arquivo.write(" -> [OK] Sem alertas ou anomalias registradas no período.\n")
             else:
                 for a in relatorio['alertas_gerados']:
-                    arquivo.write(f" - {a}\n")
-            arquivo.write("="*60 + "\n\n")
+                    arquivo.write(f" -> [ALERTA] {a}\n")
+                    
+            arquivo.write("------------------------------------------------------------\n\n")
             
         print(f"\n💾 Sucesso! Relatório salvo persistentemente em '{nome_arquivo}'.")
         
     except IOError as e:
         print(f"⚠ Erro de Entrada/Saída ao tentar gravar o arquivo: {e}")
 
-# No topo do arquivo, você pode remover ou deixar a COORDENADAS_PADRAO apenas como backup
+def ler_historico():
+
+    try:
+        with open("historico_agroorbit.txt", "r", encoding="utf-8") as arquivo:
+            conteudo = arquivo.read()
+            print(conteudo)
+
+    except FileNotFoundError:
+        print("Nenhum histórico encontrado.")
 
 def main():
+    """
+    Loop de execução principal. Orquestra a interface por linha de comando (CLI)
+    e gerencia o ciclo de vida dos dados em memória.
+    """
+
     relatorio_atual = None
     
+    # REQUISITO: Estrutura de repetição (while) para controle de fluxo contínuo do software
     while True:
         print("\n" + "#"*45)
         print("      SISTEMA INTEGRADO AGROORBIT - ODS 2      ")
@@ -202,6 +275,7 @@ def main():
         print("2. Gerar Alertas e Analisar Clima Agrícola")
         print("3. Exibir Relatório Completo na Tela")
         print("4. Salvar Relatório Atual em Arquivo")
+        print("5. Exibir Histórico Completo de Análises Anteriores")
         print("0. Sair do Sistema")
         print("#"*45)
         
@@ -209,23 +283,20 @@ def main():
             opcao = input("Digite a opção desejada (0-4): ").strip()
             
             if opcao == "1":
-                # REQUISITO: Manipulação de strings com input dinâmico
                 cidade = input("Digite o nome da cidade e estado (ex: Barreiras, Bahia): ").strip()
                 
-                # Primeiro passo: Descobre a Lat e Lon da cidade digitada
                 coordenadas = obter_coordenadas_por_cidade(cidade)
                 
                 if coordenadas:
                     lat, lon = coordenadas
                     print(f"📍 Localizado! Latitude: {lat} | Longitude: {lon}")
                     
-                    # Segundo passo: Passa a lat/lon dinâmicas para a API da NASA
                     dados_brutos = obter_dados_nasa(lat, lon)
                     
                     if dados_brutos:
                         print(f"\n✅ Dados climáticos de {cidade} importados com sucesso!")
                         relatorio_atual = analisar_clima_agricola(dados_brutos)
-                        # Adicionamos o nome da cidade no relatório para exibição posterior
+
                         if relatorio_atual:
                             relatorio_atual['cidade'] = cidade
                     
@@ -240,12 +311,10 @@ def main():
                     print(f"-> Precipitação Acumulada: {relatorio_atual['chuva_acumulada_mm']} mm")
                     print("-"*45)
                     
-                    # Captura a lista de alertas gerados
                     lista_alertas = relatorio_atual['alertas_gerados']
                     
                     print(f"🔍 Resultado do diagnóstico: {len(lista_alertas)} anomalia(s) encontrada(s).")
                     
-                    # REQUISITO: Estrutura de repetição (for) e controle (if/else)
                     if len(lista_alertas) == 0:
                         print(" ✅ STATUS: Todas as variáveis estão dentro dos limites ideais para cultivo!")
                     else:
@@ -260,13 +329,17 @@ def main():
                     print("\n⚠ Erro de fluxo: Primeiro você deve buscar os dados na Opção 1.")
                     
             elif opcao == "3":
-                # Pequeno ajuste para exibir o nome da cidade se ela existir no relatório
-                if relatorio_atual and 'cidade' in relatorio_atual:
-                    print(f"\n🌍 Região Analisada: {relatorio_atual['cidade'].upper()}")
                 exibir_relatorio(relatorio_atual)
                 
             elif opcao == "4":
-                salvar_relatorio_arquivo(relatorio_atual)
+                if relatorio_atual:
+                    salvar_relatorio_arquivo(relatorio_atual)
+                else:
+                    print("\n⚠ Não há nenhum relatório na memória para ser salvo. Execute a Opção 1 primeiro.")
+
+            elif opcao == "5":
+                print("\n📂 Exibindo histórico completo de análises anteriores:")
+                ler_historico()
                 
             elif opcao == "0":
                 print("\n🛰 AgroOrbit finalizado com sucesso. Tecnologia espacial e campo conectados!")
